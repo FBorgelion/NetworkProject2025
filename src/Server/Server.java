@@ -4,11 +4,58 @@ import java.io.IOException;
 import java.net.*;
 import java.util.Arrays;
 import java.util.Map;
+import java.util.Random;
 import java.util.TreeMap;
 
 import Shared.MyPacket;
 
 public class Server {
+	
+	private static void sendSynAck(DatagramSocket socket, InetAddress address, int port, int seqNum) throws IOException {
+		MyPacket mySynAckPacket = new MyPacket(seqNum, true, true, false, false, new byte[0]);
+		byte[] synAckBytes = mySynAckPacket.toBytes();
+		
+		DatagramPacket synAckPacket = new DatagramPacket(synAckBytes, synAckBytes.length, address, port);
+		socket.send(synAckPacket);
+		
+		System.out.println("SYN+ACK sent. Sequence number " + seqNum);
+	}
+	
+	private static void sendFinAck(DatagramSocket socket, InetAddress address, int port, int seqNum) throws IOException {
+		MyPacket myFinAckPacket = new MyPacket(seqNum, false, true, true, false, new byte[0]);
+		byte[] finAckBytes = myFinAckPacket.toBytes();
+		
+		DatagramPacket finAckPacket = new DatagramPacket(finAckBytes, finAckBytes.length, address, port);
+		socket.send(finAckPacket);
+		
+		System.out.println("FIN+ACK sent. Sequence number " + seqNum);
+	}
+	
+	private static void sendRst(DatagramSocket socket, InetAddress address, int port, int seqNum) throws IOException {
+		MyPacket myRstPacket = new MyPacket(seqNum, false, false, false, true, new byte[0]);
+		byte[] rstBytes = myRstPacket.toBytes();
+		
+		DatagramPacket rstPacket = new DatagramPacket(rstBytes, rstBytes.length, address, port);
+		socket.send(rstPacket);
+		
+		System.out.println("RST sent. Sequence number " + seqNum);
+    }
+	
+	private static void handleEOC(DatagramSocket socket, InetAddress addressClient, int portClient, int seqNum) throws IOException {
+		System.out.println("FIN received. Sending FIN+ACK...");
+		sendFinAck(socket, addressClient, portClient, seqNum);
+		
+		byte[] buffer = new byte[1024];
+	    DatagramPacket ackPacket = new DatagramPacket(buffer, buffer.length);
+	    socket.receive(ackPacket);
+	    MyPacket ackPAcket = MyPacket.fromBytes(Arrays.copyOf(buffer, ackPacket.getLength()));
+
+	    if (ackPAcket.isAck() && !ackPAcket.isFin() && ackPAcket.getData().length == 0) {
+	        System.out.println("Final ACK received. Ending session.");
+	    } else {
+	        System.err.println("Weird ending : last packet unexpected.");
+	    }
+	}
 
 	public static void main(String[] args) {
 
@@ -19,43 +66,89 @@ public class Server {
 		
 		int port = Integer.parseInt(args[0]);
 		String outputFile = args[1];
+        boolean forceRst = args.length == 3 && args[2].equals("--force-rst");
+
 		
 		try(DatagramSocket socket = new DatagramSocket(port);
 			FileOutputStream file = new FileOutputStream(outputFile)) {
 					
-			Map<Integer, byte[]> dataReceived = new TreeMap(); 			//dictionnaire trié (ici par numéro de seq)
+			Map<Integer, byte[]> dataReceived = new TreeMap<>(); 			//dictionnaire trié (ici par numéro de seq)
 			byte[] buffer = new byte[2048]; 							//2048 pour avoir une marge de sécurité pour évite le troncage udp lors de problemes
-			boolean fin = false;
 			
-			while(!fin) {
+			boolean finished = false;
+			boolean connected = false;
+			boolean firstSynReceived = false;
+			InetAddress clientAddress = null;
+			int portClient = -1;
+			
+			Random random = new Random();
+			int serverSeqNum = random.nextInt(65536);
+
+			
+			while(!finished) {
 				
 				DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
 				socket.receive(packet);
 				
-				byte[] rawData = Arrays.copyOf(packet.getData(), packet.getLength());
-				MyPacket p = MyPacket.fromBytes(rawData);
-				dataReceived.put(p.getSequenceNumber(), p.getData());
+				byte[] data = Arrays.copyOf(packet.getData(), packet.getLength());
+				MyPacket p = MyPacket.fromBytes(data);
 				
-				System.out.println("Reçu paquet #" + p.getSequenceNumber() + " (" + p.getData().length + " octets)");
-
-				if(p.isFin()) {
-					fin = true;
-					System.out.println("FIN received. File in construction...");
+				clientAddress = packet.getAddress();
+				portClient = packet.getPort();
+				
+				if (forceRst) {
+				    sendRst(socket, clientAddress, portClient, serverSeqNum);
+				    System.err.println("RST sent to client (forced).");
+				    break;
+				}
+				
+				if (p.isRst()) { 
+                    System.err.println("RST received from client. Connection ending now.");
+                    break;
+                }
+				
+				//----------------------------------------------------------------------------------------------------------------HANDSHAKE
+				
+				if(!connected) {
+					if (p.isSyn() && !firstSynReceived) {
+				        System.out.println("SYN received. Sending SYN+ACK...");
+				        sendSynAck(socket, clientAddress, portClient, serverSeqNum);
+				        firstSynReceived = true;
+				    } else if (p.isSyn() && firstSynReceived) {
+				        System.out.println("Second SYN received. Connection established.");
+				        connected = true;
+				        System.out.println("Handshake completed.");
+				    } else {
+				        System.out.println("Packet ignored. Handshake failed.");
+				    }
+				    continue;
+				}
+				//--------------------------------------------------------------------------------------------------------------------
+				
+				if (!p.isFin()) {
+				    dataReceived.put(p.getSequenceNumber(), p.getData());
+				    System.out.println("Packet received. SeqNum " + p.getSequenceNumber());
+				}
+				
+				if (p.isFin() && p.getData().length == 0) {
+				    handleEOC(socket, clientAddress, portClient, serverSeqNum);
+				    finished = true;
+				    continue;
 				}
 			}
-			System.out.println("Nombre total de paquets reçus : " + dataReceived.size());
+			System.out.println("Total packets received : " + dataReceived.size());
 
 				for(byte[] bloc : dataReceived.values()) {
 					file.write(bloc);
 				}
 				
-				System.out.println("File filled.");
+				System.out.println("File stuffed.");
 				
 			}
 			
 		catch(IOException e) {
 			
-			System.err.println("Erreur côté serveur : " + e.getMessage());
+			System.err.println("Server error : " + e.getMessage());
             e.printStackTrace();
             
 		}
