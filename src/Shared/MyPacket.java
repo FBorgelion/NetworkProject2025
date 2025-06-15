@@ -27,14 +27,14 @@ public class MyPacket {
 		public byte[] toBytes() throws IOException {
 			ByteArrayOutputStream out = new ByteArrayOutputStream();
 			
-			out.write((dataLength >> 8) & 0xFF); //byte haut
-			out.write(dataLength & 0xFF); //byte bas
+			out.write((dataLength >> 8) & 0xFF); 
+			out.write(dataLength & 0xFF);
 			
-			out.write((sequenceNumber >> 8) & 0xFF); // >> 8 déplace le premier bit vers la droite et << 8 vers la gauche
+			out.write((sequenceNumber >> 8) & 0xFF); 
 			out.write(sequenceNumber & 0xFF);
 			
 			int flags = 0;
-			if(syn) flags |= 0b0001; //0b = ecrire en binaire
+			if(syn) flags |= 0b0001; 
 			if(ack) flags |= 0b0010;
 			if(fin) flags |= 0b0100;
 			if(rst) flags |= 0b1000;

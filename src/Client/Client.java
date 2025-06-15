@@ -157,7 +157,7 @@ public class Client {
         try(DatagramSocket socket = new DatagramSocket();
     		FileInputStream file = new FileInputStream(filePath)) {
         				
-			InetAddress address = InetAddress.getByName(ip); 		//récupérer IP à partir d'une string
+			InetAddress address = InetAddress.getByName(ip); 		
 			byte[] buffer = new byte[1024];
 			int bytesRead;
 			
@@ -225,10 +225,7 @@ public class Client {
 					
 					boolean sameAck = ackNums.size() == 3 && ackNums.get(0).equals(ackNums.get(1)) && ackNums.get(1).equals(ackNums.get(2));
 
-					boolean distinctPackets = ackPacketSeqs.size() == 3 && ackPacketSeqs.stream().distinct().count() == 3;
-					
-					bufferWindow.keySet().removeIf(s -> isSeqNumLE(s, ack));	//tous les paquets dans bufferWindow dont le numéro de séquence s est inférieur ou égal à ack (modulo 65536) sont supprimés.
-					baseSeq = (ack + 1) % MAX_SEQ_NUM;
+					boolean distinctPackets = ackPacketSeqs.size() == 3 && ackPacketSeqs.stream().distinct().count() == 3;				
 					
 					if (sameAck && distinctPackets) {
 				        System.out.println("Triple ACK identical. Retransmitting....");
@@ -238,6 +235,9 @@ public class Client {
 				        ackNums.clear();
 				        ackPacketSeqs.clear();
 				    }
+					
+					bufferWindow.keySet().removeIf(s -> isSeqNumLE(s, ack));	//tous les paquets dans bufferWindow dont le numéro de séquence s est inférieur ou égal à ack (modulo 65536) sont supprimés.
+					baseSeq = (ack + 1) % MAX_SEQ_NUM;
 				}
 				
 			}
@@ -262,8 +262,6 @@ public class Client {
 			        	ackPacketSeqs.remove(0);
 			        }
 
-			        bufferWindow.keySet().removeIf(s -> isSeqNumLE(s, ack));
-			        baseSeq = (ack + 1) % MAX_SEQ_NUM;
 			        
 			        boolean sameAck = ackNums.size() == 3 && ackNums.get(0).equals(ackNums.get(1)) && ackNums.get(1).equals(ackNums.get(2));
 
@@ -277,6 +275,9 @@ public class Client {
 			            ackNums.clear();
 			            ackPacketSeqs.clear();
 			        }
+			        
+			        bufferWindow.keySet().removeIf(s -> isSeqNumLE(s, ack));
+			        baseSeq = (ack + 1) % MAX_SEQ_NUM;
 			    }
 			}
 
