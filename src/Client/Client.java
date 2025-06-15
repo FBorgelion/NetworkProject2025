@@ -5,12 +5,20 @@ import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.net.SocketTimeoutException;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
 import java.util.Random;
+import java.util.TreeMap;
 
 import Shared.MyPacket;
 
 public class Client {
+	
+	private static final int WINDOW_SIZE = 256;
+	private static final int MAX_SEQ_NUM = 1 << 16;
 	
 	private static int performHandshake(DatagramSocket socket, InetAddress address, int port, int seqNum) throws IOException {
         for (int i = 0; i < 3; i++) {
@@ -18,15 +26,19 @@ public class Client {
             System.out.println("Try " + (i + 1));
             if (waitForSynAck(socket)) {
             	System.out.println("SYN+ACK received");
-                seqNum++;
+            	seqNum = (seqNum + 1) % MAX_SEQ_NUM;
             	sendSynPacket(socket, address, port, seqNum);
                 System.out.println("Handshake completed.");
-                return seqNum+1;
+                return (seqNum + 1) % MAX_SEQ_NUM;
             }
 			System.err.println("No response. Try " + (i + 1));
         }
         return -1;
     }
+	
+	private static boolean isSeqNumLE(int s, int ack) {							//check si la taille max a été depassée --> retour à 0
+		return ((ack - s + MAX_SEQ_NUM) % MAX_SEQ_NUM) < (MAX_SEQ_NUM / 2);
+	}
 	
 	public static void sendSynPacket(DatagramSocket socket, InetAddress address, int port, int seqNum) throws IOException {		
 		MyPacket mySynPacket = new MyPacket(seqNum, true, false, false, false, new byte[0]);
@@ -66,6 +78,24 @@ public class Client {
 		socket.send(rstPacket);
 		
 		System.out.println("RST sent. Sequence number " + seqNum);
+	}
+	
+	private static int waitForAck(DatagramSocket socket) throws IOException {
+		byte[] buffer = new byte[1024];
+		DatagramPacket ackPacket = new DatagramPacket(buffer, buffer.length);
+		socket.setSoTimeout(500);
+		try {
+			socket.receive(ackPacket);
+			MyPacket myAckPacket = MyPacket.fromBytes(Arrays.copyOf(buffer, ackPacket.getLength()));
+			if (myAckPacket.isAck() && myAckPacket.getData().length == 2) {
+				int ackNum = ((myAckPacket.getData()[0] & 0xFF) << 8) | (myAckPacket.getData()[1] & 0xFF);
+				System.out.println("ACK received for seqNum " + ackNum);
+				return ackNum;
+			}
+		} catch (SocketTimeoutException e) {
+			System.out.println("ACK wait timed out.");
+		}
+		return -1;
 	}
 	
 	private static boolean waitForSynAck(DatagramSocket socket) throws IOException {
@@ -110,17 +140,19 @@ public class Client {
 		}
 	}
 
-	public static void main(String[] args) {
+	public static void main(String[] args) throws InterruptedException {
 		
 		if (args.length < 3 || args.length > 4) {
 		    System.out.println("Usage: java Client <ip> <port> <fichier> [--send-rst]");
 		    return;
 		}
-		
+
 		String ip = args[0];
         int port = Integer.parseInt(args[1]);
         String filePath = args[2];
-        boolean sendRst = args.length == 4 && args[3].equals("--send-rst");
+        boolean sendRst = args.length == 4 && args[3].equals("--send-rst");     
+    
+
         
         try(DatagramSocket socket = new DatagramSocket();
     		FileInputStream file = new FileInputStream(filePath)) {
@@ -133,7 +165,7 @@ public class Client {
 			
 			Random random = new Random();
 			int initSeqNum = random.nextInt(65536);
-			
+						
 			int seqNum = performHandshake(socket, address, port, initSeqNum);
 			if(seqNum == -1) {
 				System.err.println("Connection failed. Server not reached.");
@@ -148,29 +180,117 @@ public class Client {
                 return;
             }
 			
-			while((bytesRead = file.read(buffer)) != -1) { //-1 == EOF
-				
-				byte[] byteRead = Arrays.copyOf(buffer, bytesRead);
-				
-				MyPacket p = new MyPacket(seqNum, false, false, false, false, byteRead);
-				byte[] toSend = p.toBytes();
-				
-				DatagramPacket packet = new DatagramPacket(toSend, toSend.length, address, port);
-				System.out.println("Sending packet #" + seqNum + " (" + byteRead.length + " bytes)");
+			Map<Integer, MyPacket> bufferWindow = new TreeMap<>();
+			
+			List<Integer> ackNums = new ArrayList<>();
+			List<Integer> ackPacketSeqs = new ArrayList<>();
+		    int lastAckPacketSeqNum = 0;
 
-				socket.send(packet);
-				seqNum++;
+			
+			int baseSeq = seqNum;
+			
+			boolean fileDone = false;
+
+			while((bytesRead = file.read(buffer)) != -1 || !bufferWindow.isEmpty()) { //-1 == EOF
+				if((bytesRead != -1) && ((seqNum-baseSeq + MAX_SEQ_NUM) % MAX_SEQ_NUM < WINDOW_SIZE)) {	//vérifie qu'il reste des donnees à lire && vérifie que les numéros de séquence sont dans la fenetre de transmission
+					
+					byte[] byteRead = Arrays.copyOf(buffer, bytesRead);
+					
+					MyPacket p = new MyPacket(seqNum, false, false, false, false, byteRead);
+					byte[] toSend = p.toBytes();
+					
+					bufferWindow.put(seqNum, p);
+					
+					DatagramPacket packet = new DatagramPacket(toSend, toSend.length, address, port);
+					System.out.println("Sending packet " + seqNum + " (" + byteRead.length + " bytes)");
+	
+					socket.send(packet);
+					seqNum++;
+					
+				}
+			
+
+			    int ack = waitForAck(socket);
+				if(ack != -1) {				
+					int ackPacketSeq = lastAckPacketSeqNum++;
+					ackNums.add(ack);
+					ackPacketSeqs.add(ackPacketSeq);
+					
+					if(ackNums.size() > 3) {
+						ackNums.remove(0);
+					}
+					if (ackPacketSeqs.size() > 3) {
+						ackPacketSeqs.remove(0);
+					}
+					
+					boolean sameAck = ackNums.size() == 3 && ackNums.get(0).equals(ackNums.get(1)) && ackNums.get(1).equals(ackNums.get(2));
+
+					boolean distinctPackets = ackPacketSeqs.size() == 3 && ackPacketSeqs.stream().distinct().count() == 3;
+					
+					bufferWindow.keySet().removeIf(s -> isSeqNumLE(s, ack));	//tous les paquets dans bufferWindow dont le numéro de séquence s est inférieur ou égal à ack (modulo 65536) sont supprimés.
+					baseSeq = (ack + 1) % MAX_SEQ_NUM;
+					
+					if (sameAck && distinctPackets) {
+				        System.out.println("Triple ACK identical. Retransmitting....");
+				        for (MyPacket p : bufferWindow.values()) {
+				            socket.send(new DatagramPacket(p.toBytes(), p.toBytes().length, address, port));
+				        }
+				        ackNums.clear();
+				        ackPacketSeqs.clear();
+				    }
+				}
 				
 			}
+			
+			long lastAckTime = System.currentTimeMillis();
+			long period = 3000; // 3 secondes pour laisser le server le temps de traiter les données
+
+			while (!bufferWindow.isEmpty() && System.currentTimeMillis() - lastAckTime < period) {
+			    int ack = waitForAck(socket);
+			    if (ack != -1) {
+			        lastAckTime = System.currentTimeMillis(); // reset timer
+			        
+			        int ackPacketSeq = lastAckPacketSeqNum++;
+
+			        ackNums.add(ack);
+			        ackPacketSeqs.add(ackPacketSeq);
+			        
+			        if (ackNums.size() > 3) {
+			        	ackNums.remove(0);
+			        }
+			        if (ackPacketSeqs.size() > 3) {
+			        	ackPacketSeqs.remove(0);
+			        }
+
+			        bufferWindow.keySet().removeIf(s -> isSeqNumLE(s, ack));
+			        baseSeq = (ack + 1) % MAX_SEQ_NUM;
+			        
+			        boolean sameAck = ackNums.size() == 3 && ackNums.get(0).equals(ackNums.get(1)) && ackNums.get(1).equals(ackNums.get(2));
+
+			        boolean distinctPackets = ackPacketSeqs.size() == 3 && ackPacketSeqs.stream().distinct().count() == 3;
+
+			        if (sameAck && distinctPackets) {
+				        System.out.println("Triple ACK identical. Retransmitting....");
+			            for (MyPacket p : bufferWindow.values()) {
+			                socket.send(new DatagramPacket(p.toBytes(), p.toBytes().length, address, port));
+			            }
+			            ackNums.clear();
+			            ackPacketSeqs.clear();
+			        }
+			    }
+			}
+
 			
 			System.out.println("File fully sent.");
 			
 			closeConnection(socket, address, port, seqNum);
+			
+			
 						
         }
         catch(IOException e) {
         	
-        	System.err.println("Erreur côté client : " + e.getMessage());
+        	System.err.println("Error client : " + e.getMessage());
             e.printStackTrace();
             
         }

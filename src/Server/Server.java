@@ -11,6 +11,20 @@ import Shared.MyPacket;
 
 public class Server {
 	
+	private static void sendAck(DatagramSocket socket, InetAddress address, int port, int seqNum, int ackNum) throws IOException {
+		byte[] ackData = new byte[2]; 						//pour stocker les 16 bits du numéro de séquence
+		ackData[0] = (byte) ((ackNum >> 8) & 0xFF);			//ackNum = le numéro de séquence du dernier paquet recu de mainere continue 
+        ackData[1] = (byte) (ackNum & 0xFF);
+        
+        MyPacket myAckPacket = new MyPacket(seqNum, false, true, false, false, ackData);
+		byte[] ackBytes = myAckPacket.toBytes();
+		
+		DatagramPacket ackPacket = new DatagramPacket(ackBytes, ackBytes.length, address, port);
+		socket.send(ackPacket);
+		
+		System.out.println("ACK sent. ACK for Sequence number " + ackNum);
+	}
+	
 	private static void sendSynAck(DatagramSocket socket, InetAddress address, int port, int seqNum) throws IOException {
 		MyPacket mySynAckPacket = new MyPacket(seqNum, true, true, false, false, new byte[0]);
 		byte[] synAckBytes = mySynAckPacket.toBytes();
@@ -18,7 +32,7 @@ public class Server {
 		DatagramPacket synAckPacket = new DatagramPacket(synAckBytes, synAckBytes.length, address, port);
 		socket.send(synAckPacket);
 		
-		System.out.println("SYN+ACK sent. Sequence number " + seqNum);
+		System.out.println("SYN+ACK sent.");
 	}
 	
 	private static void sendFinAck(DatagramSocket socket, InetAddress address, int port, int seqNum) throws IOException {
@@ -28,7 +42,7 @@ public class Server {
 		DatagramPacket finAckPacket = new DatagramPacket(finAckBytes, finAckBytes.length, address, port);
 		socket.send(finAckPacket);
 		
-		System.out.println("FIN+ACK sent. Sequence number " + seqNum);
+		System.out.println("FIN+ACK sent.");
 	}
 	
 	private static void sendRst(DatagramSocket socket, InetAddress address, int port, int seqNum) throws IOException {
@@ -38,7 +52,7 @@ public class Server {
 		DatagramPacket rstPacket = new DatagramPacket(rstBytes, rstBytes.length, address, port);
 		socket.send(rstPacket);
 		
-		System.out.println("RST sent. Sequence number " + seqNum);
+		System.out.println("RST sent. ");
     }
 	
 	private static void handleEOC(DatagramSocket socket, InetAddress addressClient, int portClient, int seqNum) throws IOException {
@@ -56,10 +70,19 @@ public class Server {
 	        System.err.println("Weird ending : last packet unexpected.");
 	    }
 	}
+	
+	private static int findLastContinuousSequenceNumber(TreeMap<Integer, byte[]> dataReceived, int current) {
+		 int expected = current;
+	        while (dataReceived.containsKey(expected)) {
+	            expected++;
+	        }
+	        return expected - 1;
+	}
+
 
 	public static void main(String[] args) {
 
-		if(args.length != 2) {
+		if (args.length < 2 || args.length > 3) {
 			System.out.println("Usage : java Server <port> <file>");
 			return;
 		}
@@ -78,12 +101,14 @@ public class Server {
 			boolean finished = false;
 			boolean connected = false;
 			boolean firstSynReceived = false;
+			
+			int lastSeqNumContinuous = -1;
+						
 			InetAddress clientAddress = null;
 			int portClient = -1;
 			
 			Random random = new Random();
 			int serverSeqNum = random.nextInt(65536);
-
 			
 			while(!finished) {
 				
@@ -118,16 +143,25 @@ public class Server {
 				        System.out.println("Second SYN received. Connection established.");
 				        connected = true;
 				        System.out.println("Handshake completed.");
+				        lastSeqNumContinuous = p.getSequenceNumber();
+				        continue;
 				    } else {
 				        System.out.println("Packet ignored. Handshake failed.");
+				        continue;
 				    }
-				    continue;
 				}
 				//--------------------------------------------------------------------------------------------------------------------
-				
 				if (!p.isFin()) {
+		
 				    dataReceived.put(p.getSequenceNumber(), p.getData());
 				    System.out.println("Packet received. SeqNum " + p.getSequenceNumber());
+
+				    int newLastSeq = findLastContinuousSequenceNumber((TreeMap<Integer, byte[]>) dataReceived, lastSeqNumContinuous + 1);
+				    if (newLastSeq != lastSeqNumContinuous) {
+				        lastSeqNumContinuous = newLastSeq;
+				        sendAck(socket, clientAddress, portClient, serverSeqNum++, lastSeqNumContinuous);
+				    }
+				    continue;
 				}
 				
 				if (p.isFin() && p.getData().length == 0) {
